@@ -1157,10 +1157,13 @@
       OrbitControls.prototype.constructor = OrbitControls;
 
       let camera, scene, renderer, clock, axesHelper;
+      const mouse = new THREE.Vector2();
+      const raycaster = new THREE.Raycaster();
+      let intersected;
 
       const guiConfig = {
         points: {
-          size: 0.2,
+          size: 0.01,
           axis: 2,
           minDepth: 0.0,
           maxDepth: 1.0,
@@ -1171,7 +1174,7 @@
           useHSVLerp: true,
         },
         planes: {
-          visible: false,
+          visible: true,
         },
       };
 
@@ -1344,7 +1347,8 @@
         function iterateNodes(node, depth) {
           if (node.nodes && node.nodes.length > 0) {
             const { center, first, second, normal } = node.plane;
-            planes.push({ center, first, second, normal, depth });
+            const ra = node.roughness_params.params[0].value;
+            planes.push({ center, first, second, normal, depth, ra });
             for (const childNode of node.nodes) {
               iterateNodes(childNode, depth + 1);
             }
@@ -1354,6 +1358,14 @@
         iterateNodes(rootNode, 1);
 
         return planes;
+      }
+
+      function onMouseMove(event) {
+        // calculate mouse position in normalized device coordinates
+        // (-1 to +1) for both components
+
+        mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
       }
 
       function init() {
@@ -1405,8 +1417,11 @@
         renderer.setSize(window.innerWidth, window.innerHeight);
         document.body.appendChild(renderer.domElement);
 
+        // WINDOW EVENTS
         window.addEventListener("resize", onWindowResize);
+        window.addEventListener("mousemove", onMouseMove, false);
 
+        // CONTROLS AND HELPERS
         controls = new OrbitControls(camera, renderer.domElement);
         camera.position.set(0, 0, 10);
         controls.update();
@@ -1440,44 +1455,99 @@
         for (const plane of planes) {
           const geometry = new THREE.BufferGeometry();
 
-          const center = [plane.center.x, plane.center.z, plane.center.y];
-          const f = [plane.first.x, plane.first.z, plane.first.y];
-          const s = [plane.second.x, plane.second.z, plane.second.y];
+          const ra = plane.ra;
+          const center = new THREE.Vector3(
+            plane.center.x,
+            plane.center.z,
+            plane.center.y
+          );
+          const n = new THREE.Vector3(
+            plane.normal.x,
+            plane.normal.z,
+            plane.normal.y
+          ).normalize();
+          const f = new THREE.Vector3(
+            plane.first.x,
+            plane.first.z,
+            plane.first.y
+          );
+          const s = new THREE.Vector3(
+            plane.second.x,
+            plane.second.z,
+            plane.second.y
+          );
 
-          const df = [f[0] - center[0], f[1] - center[1], f[2] - center[2]];
-          const ds = [s[0] - center[0], s[1] - center[1], s[2] - center[2]];
+          const df = new THREE.Vector3(
+            f.x - center.x,
+            f.y - center.y,
+            f.z - center.z
+          );
+          const ds = new THREE.Vector3(
+            s.x - center.x,
+            s.y - center.y,
+            s.z - center.z
+          );
 
           const factor = 1.0 / plane.depth;
 
-          const a = [
-            center[0] - df[0] * factor - cloudCenter.x,
-            center[1] - df[1] * factor - cloudCenter.y,
-            center[2] - df[2] * factor - cloudCenter.z,
+          const aP = [
+            center.x - df.x * factor - cloudCenter.x + n.x * ra,
+            center.y - df.y * factor - cloudCenter.y + n.y * ra,
+            center.z - df.z * factor - cloudCenter.z + n.z * ra,
           ];
-          const b = [
-            center[0] - ds[0] * factor - cloudCenter.x,
-            center[1] - ds[1] * factor - cloudCenter.y,
-            center[2] - ds[2] * factor - cloudCenter.z,
+          const bP = [
+            center.x - ds.x * factor - cloudCenter.x + n.x * ra,
+            center.y - ds.y * factor - cloudCenter.y + n.y * ra,
+            center.z - ds.z * factor - cloudCenter.z + n.z * ra,
           ];
-          const c = [
-            center[0] + df[0] * factor - cloudCenter.x,
-            center[1] + df[1] * factor - cloudCenter.y,
-            center[2] + df[2] * factor - cloudCenter.z,
+          const cP = [
+            center.x + df.x * factor - cloudCenter.x + n.x * ra,
+            center.y + df.y * factor - cloudCenter.y + n.y * ra,
+            center.z + df.z * factor - cloudCenter.z + n.z * ra,
           ];
-          const d = [
-            center[0] + ds[0] * factor - cloudCenter.x,
-            center[1] + ds[1] * factor - cloudCenter.y,
-            center[2] + ds[2] * factor - cloudCenter.z,
+          const dP = [
+            center.x + ds.x * factor - cloudCenter.x + n.x * ra,
+            center.y + ds.y * factor - cloudCenter.y + n.y * ra,
+            center.z + ds.z * factor - cloudCenter.z + n.z * ra,
+          ];
+
+          const aN = [
+            center.x - df.x * factor - cloudCenter.x - +n.x * ra,
+            center.y - df.y * factor - cloudCenter.y - +n.y * ra,
+            center.z - df.z * factor - cloudCenter.z - +n.z * ra,
+          ];
+          const bN = [
+            center.x - ds.x * factor - cloudCenter.x - n.x * ra,
+            center.y - ds.y * factor - cloudCenter.y - n.y * ra,
+            center.z - ds.z * factor - cloudCenter.z - n.z * ra,
+          ];
+          const cN = [
+            center.x + df.x * factor - cloudCenter.x - n.x * ra,
+            center.y + df.y * factor - cloudCenter.y - n.y * ra,
+            center.z + df.z * factor - cloudCenter.z - n.z * ra,
+          ];
+          const dN = [
+            center.x + ds.x * factor - cloudCenter.x - n.x * ra,
+            center.y + ds.y * factor - cloudCenter.y - n.y * ra,
+            center.z + ds.z * factor - cloudCenter.z - n.z * ra,
           ];
 
           const vertices = new Float32Array([
-            ...a,
-            ...b,
-            ...c,
+            ...aP,
+            ...bP,
+            ...cP,
 
-            ...c,
-            ...d,
-            ...a,
+            ...cP,
+            ...dP,
+            ...aP,
+
+            ...aN,
+            ...bN,
+            ...cN,
+
+            ...cN,
+            ...dN,
+            ...aN,
           ]);
 
           // itemSize = 3 because there are 3 values (components) per vertex
@@ -1490,10 +1560,10 @@
           //const color = 255 * (1.0 / plane.depth);
 
           const material = new THREE.MeshBasicMaterial({
-            color: `rgb(140, 20 , 170)`,
+            color: `rgb(255, 255 , 255)`,
             side: THREE.DoubleSide,
             transparent: true,
-            opacity: 0.4 + (1.0 / plane.depth) * 0.4,
+            opacity: 0.5 + (1.0 / plane.depth) * 0.5,
           });
           const mesh = new THREE.Mesh(geometry, material);
 
@@ -1524,7 +1594,33 @@
 
         controls.update();
 
+        checkMouseOver();
+
         renderer.render(scene, camera);
+      }
+
+      function checkMouseOver() {
+        raycaster.setFromCamera(mouse, camera);
+
+        // create an array containing all objects in the scene with which the ray intersects
+        const intersects = raycaster.intersectObjects(
+          scene.children.filter((el) => el.type === "Mesh")
+        );
+
+        if (intersects.length > 0) {
+          if (intersected) {
+            if (intersected === intersects[0]) return;
+            intersected.material.color.set(intersected.oldHex);
+          }
+          intersected = intersects[0].object;
+          intersected.oldHex = intersected.material.color.getHex();
+          intersected.material.color.set(0xff0000);
+        } else {
+          if (intersected) {
+            intersected.material.color.set(intersected.oldHex);
+          }
+          intersected = null;
+        }
       }
     </script>
   </body>
