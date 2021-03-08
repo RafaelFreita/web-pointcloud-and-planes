@@ -20,24 +20,6 @@
 
       var gui = new dat.GUI({ name: "My GUI" });
 
-      function generatePlanes(rootNode) {
-        const planes = [];
-
-        function iterateNodes(node, depth) {
-          if (node.nodes && node.nodes.length > 0) {
-            const { center, first, second, normal } = node.plane;
-            planes.push({ center, first, second, normal, depth });
-            for (const childNode of node.nodes) {
-              iterateNodes(childNode, depth + 1);
-            }
-          }
-        }
-
-        iterateNodes(rootNode, 1);
-
-        return planes;
-      }
-
       const planes = generatePlanes(
         SURFACES_GEOLOGY_01[0].surface_roughness_data.node
       );
@@ -1174,17 +1156,205 @@
       OrbitControls.prototype = Object.create(EventDispatcher.prototype);
       OrbitControls.prototype.constructor = OrbitControls;
 
-      let camera, scene, renderer, clock;
+      let camera, scene, renderer, clock, axesHelper;
 
-      let points;
+      const guiConfig = {
+        points: {
+          size: 0.2,
+          axis: 2,
+          minDepth: 0.0,
+          maxDepth: 1.0,
+          minColor: [239, 138, 98],
+          maxColor: [103, 169, 207],
+          useMidColor: false,
+          midColor: [247, 247, 247],
+          useHSVLerp: true,
+        },
+        planes: {
+          visible: false,
+        },
+      };
+
+      let points, pointsColors, pointsMaterial;
       const cloudCenter = new THREE.Vector3();
       const planeMeshes = [];
       const planeControls = [];
 
       let controls;
 
+      configureGui();
       init();
       animate();
+
+      // Helper functions
+      function inverseLerp(a, b, v) {
+        return (v - a) / (b - a);
+      }
+
+      function lerp(a, b, t) {
+        return t * b - (t - 1) * a;
+      }
+      function rgb2hsv(r, g, b) {
+        let v = Math.max(r, g, b),
+          c = v - Math.min(r, g, b);
+        let h =
+          c &&
+          (v == r ? (g - b) / c : v == g ? 2 + (b - r) / c : 4 + (r - g) / c);
+        return [60 * (h < 0 ? h + 6 : h), v && c / v, v];
+      }
+
+      let hsv2rgb = (
+        h,
+        s,
+        v,
+        f = (n, k = (n + h / 60) % 6) =>
+          v - v * s * Math.max(Math.min(k, 4 - k, 1), 0)
+      ) => [f(5), f(3), f(1)];
+
+      function lerpColor(a, b, t) {
+        return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
+      }
+
+      function lerpColorHSV(a, b, t) {
+        const aHSV = rgb2hsv(a[0], a[1], a[2]);
+        const bHSV = rgb2hsv(b[0], b[1], b[2]);
+
+        const s = lerp(aHSV[1], bHSV[1], t);
+        const v = lerp(aHSV[2], bHSV[2], t);
+
+        let h;
+        let d = bHSV[0] - aHSV[0];
+        if (aHSV[0] > bHSV[0]) {
+          // Swap
+          const tempH = bHSV[0];
+          bHSV[0] = aHSV[0];
+          aHSV[0] = tempH;
+
+          d *= -1;
+          t = 1 - t;
+        }
+
+        if (d > 180) {
+          aHSV[0] = aHSV[0] + 360;
+          h = (aHSV[0] + t * (bHSV[0] - aHSV[0])) % 360;
+        }
+        if (d <= 180) {
+          h = aHSV[0] + t * d;
+        }
+
+        const lerpedHSV = [h, s, v];
+        const lerpedHSV2RBG = hsv2rgb(lerpedHSV[0], lerpedHSV[1], lerpedHSV[2]);
+        return lerpedHSV2RBG;
+      }
+
+      // Gui config
+
+      function configureGui() {
+        const pointsFolder = gui.addFolder("Points");
+        pointsFolder.open();
+
+        pointsFolder
+          .add(guiConfig.points, "size", 0.0001, 1.0)
+          .onChange(setPointsMaterialGUI);
+
+        pointsFolder
+          .add(guiConfig.points, "axis", 0, 2, 1)
+          .onChange(setPointsVertexColor);
+
+        pointsFolder
+          .add(guiConfig.points, "minDepth", 0.0, 1.0, 0.01)
+          .onChange(setPointsVertexColor);
+
+        pointsFolder
+          .add(guiConfig.points, "maxDepth", 0.0, 1.0, 0.01)
+          .onChange(setPointsVertexColor);
+
+        pointsFolder
+          .addColor(guiConfig.points, "minColor")
+          .onChange(setPointsVertexColor);
+
+        pointsFolder
+          .addColor(guiConfig.points, "maxColor")
+          .onChange(setPointsVertexColor);
+
+        pointsFolder
+          .add(guiConfig.points, "useMidColor")
+          .onChange(setPointsVertexColor);
+
+        pointsFolder
+          .addColor(guiConfig.points, "midColor")
+          .onChange(setPointsVertexColor);
+
+        pointsFolder
+          .add(guiConfig.points, "useHSVLerp")
+          .onChange(setPointsVertexColor);
+
+        const planesFolder = gui.addFolder("Planes");
+
+        planesFolder
+          .add(guiConfig.planes, "visible")
+          .onChange(changePlanesVisibility);
+      }
+
+      function pointCloudColorsByDepth(points, axis = 0) {
+        let minV = Number.MAX_VALUE,
+          maxV = Number.MIN_VALUE;
+
+        const array = points.geometry.attributes.position.array;
+
+        // Get point depth based on axis
+        for (let i = axis; i < array.length; i += 3) {
+          if (array[i] < minV) minV = array[i];
+          if (array[i] > maxV) maxV = array[i];
+        }
+
+        const { minDepth, maxDepth } = guiConfig.points;
+
+        // Generate color array
+        const colors = [];
+
+        const minColor = guiConfig.points.minColor.map((v) => v / 255);
+        const midColor = guiConfig.points.midColor.map((v) => v / 255);
+        const maxColor = guiConfig.points.maxColor.map((v) => v / 255);
+        const useMidColor = guiConfig.points.useMidColor;
+        const useHsvLerp = guiConfig.points.useHSVLerp;
+
+        const lerpFunction = useHsvLerp ? lerpColorHSV : lerpColor;
+
+        for (let i = axis; i < array.length; i += 3) {
+          const pointDepth = inverseLerp(minV, maxV, array[i]);
+          const pointValue = lerp(minDepth, maxDepth, pointDepth);
+          const pointColor = useMidColor
+            ? pointValue <= 0.5
+              ? lerpFunction(minColor, midColor, pointValue * 2)
+              : lerpFunction(midColor, maxColor, (pointValue - 0.5) * 2)
+            : lerpFunction(minColor, maxColor, pointValue);
+
+          colors.push(pointColor[0]); // R
+          colors.push(pointColor[1]); // G
+          colors.push(pointColor[2]); // B
+        }
+
+        return colors;
+      }
+
+      function generatePlanes(rootNode) {
+        const planes = [];
+
+        function iterateNodes(node, depth) {
+          if (node.nodes && node.nodes.length > 0) {
+            const { center, first, second, normal } = node.plane;
+            planes.push({ center, first, second, normal, depth });
+            for (const childNode of node.nodes) {
+              iterateNodes(childNode, depth + 1);
+            }
+          }
+        }
+
+        iterateNodes(rootNode, 1);
+
+        return planes;
+      }
 
       function init() {
         camera = new THREE.PerspectiveCamera(
@@ -1207,20 +1377,27 @@
           geometry.boundingBox.getCenter(cloudCenter);
           geometry.center();
 
-          const vertexColors = geometry.hasAttribute("color") === true;
-          const material = new THREE.PointsMaterial({
-            size: 0.005,
-            vertexColors: vertexColors,
-            color: `rgb(220, 170, 255)`,
+          pointsMaterial = new THREE.PointsMaterial({
+            size: guiConfig.points.size,
+            vertexColors: true,
             sizeAttenuation: true,
           });
 
-          points = new THREE.Points(geometry, material);
+          setPointsMaterialGUI();
+
+          points = new THREE.Points(geometry, pointsMaterial);
           scene.add(points);
 
           generatePlanesMeshes();
-          configurePlanesGUI();
-          setMeshes();
+          //configurePlanesGUI();
+          changePlanesVisibility();
+
+          pointsColors = pointCloudColorsByDepth(points, 2);
+
+          geometry.setAttribute(
+            "color",
+            new Float32BufferAttribute(pointsColors, 3)
+          );
         });
 
         renderer = new THREE.WebGLRenderer();
@@ -1233,6 +1410,23 @@
         controls = new OrbitControls(camera, renderer.domElement);
         camera.position.set(0, 0, 10);
         controls.update();
+
+        axesHelper = new THREE.AxesHelper(5);
+        scene.add(axesHelper);
+      }
+
+      function setPointsMaterialGUI() {
+        pointsMaterial.size = guiConfig.points.size;
+      }
+
+      function setPointsVertexColor() {
+        points.geometry.setAttribute(
+          "color",
+          new Float32BufferAttribute(
+            pointCloudColorsByDepth(points, guiConfig.points.axis),
+            3
+          )
+        );
       }
 
       function onWindowResize() {
@@ -1313,12 +1507,13 @@
         }
       }
 
-      function setMeshes() {
-        for (const mesh of planeMeshes) {
-          scene.remove(mesh);
-          if (mesh.visible) {
+      function changePlanesVisibility() {
+        if (guiConfig.planes.visible) {
+          for (const mesh of planeMeshes) {
             scene.add(mesh.mesh);
-          } else {
+          }
+        } else {
+          for (const mesh of planeMeshes) {
             scene.remove(mesh.mesh);
           }
         }
