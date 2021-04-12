@@ -4,7 +4,6 @@ import {
   Vector3,
   Raycaster,
   PerspectiveCamera,
-  Clock,
   Scene,
   PointsMaterial,
   Points,
@@ -20,18 +19,45 @@ import {
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { XYZLoader } from "three/examples/jsm/loaders/XYZLoader.js";
 
+import axios from "axios";
+
+const SERVER = "http://127.0.0.1:3000";
+const MODEL_ID = 1;
+
+const api = axios.create({ baseURL: SERVER });
+
+import { lerp, lerpColor, lerpColorHSV, inverseLerp } from "./color.js";
+
 const gui = new dat.GUI({ name: "My GUI" });
 
-const planes = generatePlanes(
-  SURFACES_GEOLOGY_01[0].surface_roughness_data.node
-);
+let planes;
+function loadPlanes(id) {
+  for (const planeMesh of planeMeshes) {
+    scene.remove(planeMesh.mesh);
+  }
+  planeMeshes.length = 0;
+  api(`${id}/planes`).then((res) => {
+    // Cleaning planes
+    // Only using EVAL because the data source is reliable.
+    // TODO: Change files to JSON instead of JS and use JSON.parse instead of eval
+    const planesData = eval(res.data);
+    planes = generatePlanes(planesData[0].surface_roughness_data.node);
 
-let camera, scene, renderer, clock, axesHelper;
+    generatePlanesMeshes();
+    //changePlanesVisibility();
+    //configurePlanesGUI();
+  });
+}
+
+let camera, scene, renderer, axesHelper;
 const mouse = new Vector2();
 const raycaster = new Raycaster();
 let intersected;
 
 const guiConfig = {
+  general: {
+    model: 1,
+  },
   points: {
     size: 0.01,
     axis: 2,
@@ -48,6 +74,21 @@ const guiConfig = {
   },
 };
 
+let availableModels;
+api.get("").then((res) => {
+  availableModels = res.data;
+
+  const modelsObject = {};
+  for (const model of availableModels) {
+    modelsObject[model.id] = model.id;
+  }
+
+  gui.add(guiConfig.general, "model", modelsObject).onChange(async () => {
+    await loadPoints(guiConfig.general.model);
+    loadPlanes(guiConfig.general.model);
+  });
+});
+
 let points, pointsColors, pointsMaterial;
 const cloudCenter = new Vector3();
 const planeMeshes = [];
@@ -57,67 +98,10 @@ let controls;
 
 configureGui();
 init();
+loadPoints(MODEL_ID).then((_) => {
+  loadPlanes(MODEL_ID);
+});
 animate();
-
-// Helper functions
-function inverseLerp(a, b, v) {
-  return (v - a) / (b - a);
-}
-
-function lerp(a, b, t) {
-  return t * b - (t - 1) * a;
-}
-function rgb2hsv(r, g, b) {
-  let v = Math.max(r, g, b),
-    c = v - Math.min(r, g, b);
-  let h =
-    c && (v == r ? (g - b) / c : v == g ? 2 + (b - r) / c : 4 + (r - g) / c);
-  return [60 * (h < 0 ? h + 6 : h), v && c / v, v];
-}
-
-let hsv2rgb = (
-  h,
-  s,
-  v,
-  f = (n, k = (n + h / 60) % 6) =>
-    v - v * s * Math.max(Math.min(k, 4 - k, 1), 0)
-) => [f(5), f(3), f(1)];
-
-function lerpColor(a, b, t) {
-  return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
-}
-
-function lerpColorHSV(a, b, t) {
-  const aHSV = rgb2hsv(a[0], a[1], a[2]);
-  const bHSV = rgb2hsv(b[0], b[1], b[2]);
-
-  const s = lerp(aHSV[1], bHSV[1], t);
-  const v = lerp(aHSV[2], bHSV[2], t);
-
-  let h;
-  let d = bHSV[0] - aHSV[0];
-  if (aHSV[0] > bHSV[0]) {
-    // Swap
-    const tempH = bHSV[0];
-    bHSV[0] = aHSV[0];
-    aHSV[0] = tempH;
-
-    d *= -1;
-    t = 1 - t;
-  }
-
-  if (d > 180) {
-    aHSV[0] = aHSV[0] + 360;
-    h = (aHSV[0] + t * (bHSV[0] - aHSV[0])) % 360;
-  }
-  if (d <= 180) {
-    h = aHSV[0] + t * d;
-  }
-
-  const lerpedHSV = [h, s, v];
-  const lerpedHSV2RBG = hsv2rgb(lerpedHSV[0], lerpedHSV[1], lerpedHSV[2]);
-  return lerpedHSV2RBG;
-}
 
 // Gui config
 
@@ -250,34 +234,6 @@ function init() {
   scene.add(camera);
   camera.lookAt(scene.position);
 
-  clock = new Clock();
-
-  const loader = new XYZLoader();
-  loader.load("./Cloud.xyz", function (geometry) {
-    geometry.computeBoundingBox();
-    geometry.boundingBox.getCenter(cloudCenter);
-    geometry.center();
-
-    pointsMaterial = new PointsMaterial({
-      size: guiConfig.points.size,
-      vertexColors: true,
-      sizeAttenuation: true,
-    });
-
-    setPointsMaterialGUI();
-
-    points = new Points(geometry, pointsMaterial);
-    scene.add(points);
-
-    generatePlanesMeshes();
-    //configurePlanesGUI();
-    changePlanesVisibility();
-
-    pointsColors = pointCloudColorsByDepth(points, 2);
-
-    geometry.setAttribute("color", new Float32BufferAttribute(pointsColors, 3));
-  });
-
   renderer = new WebGLRenderer();
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setSize(window.innerWidth, window.innerHeight);
@@ -294,6 +250,39 @@ function init() {
 
   axesHelper = new AxesHelper(5);
   scene.add(axesHelper);
+}
+
+function loadPoints(id) {
+  if (points) {
+    scene.remove(points);
+  }
+
+  const loader = new XYZLoader();
+  return new Promise((resolve, reject) => {
+    loader.load(`${SERVER}/${id}/points`, function (geometry) {
+      geometry.computeBoundingBox();
+      geometry.boundingBox.getCenter(cloudCenter);
+      geometry.center();
+
+      pointsMaterial = new PointsMaterial({
+        size: guiConfig.points.size,
+        vertexColors: true,
+        sizeAttenuation: true,
+      });
+
+      setPointsMaterialGUI();
+
+      points = new Points(geometry, pointsMaterial);
+      pointsColors = pointCloudColorsByDepth(points, 2);
+      geometry.setAttribute(
+        "color",
+        new Float32BufferAttribute(pointsColors, 3)
+      );
+
+      scene.add(points);
+      resolve();
+    });
+  });
 }
 
 function setPointsMaterialGUI() {
@@ -411,6 +400,7 @@ function generatePlanesMeshes() {
     const mesh = new Mesh(geometry, material);
 
     planeMeshes.push({ mesh, visible: true });
+    scene.add(mesh);
   }
 }
 
@@ -421,6 +411,7 @@ function configurePlanesGUI() {
 }
 
 function changePlanesVisibility() {
+  console.log("Change visibility to", guiConfig.planes.visible);
   if (guiConfig.planes.visible) {
     for (const mesh of planeMeshes) {
       scene.add(mesh.mesh);
